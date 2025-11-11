@@ -10,6 +10,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,26 +30,25 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
-      - name: Login to GHCR
-        if: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_USERNAME != '' }}
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-
-      - name: Build image
-        if: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_USERNAME != '' }}
+      - name: Build and Push Docker Image (if secrets set)
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          IMAGE=ghcr.io/${{ secrets.GHCR_USERNAME }}/iris-api:${{ github.sha }}
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-          docker build -t $IMAGE .
+          if [ -n "$GHCR_TOKEN" ] && [ -n "$GHCR_USERNAME" ]; then
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+            IMAGE="ghcr.io/$GHCR_USERNAME/iris-api:${{ github.sha }}"
+            echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+            docker build -t $IMAGE .
+            docker push $IMAGE
+          else
+            echo "Skipping GHCR push (no secrets configured)."
+            echo "IMAGE=ghcr.io/example/iris-api:latest" >> $GITHUB_ENV
+          fi
 
-      - name: Push image
-        if: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_USERNAME != '' }}
-        run: docker push $IMAGE
-
-      - name: Update deployment image (artifact only)
+      - name: Update deployment manifest
         run: |
-          IMAGE="${{ env.IMAGE }}"
-          if [ -z "$IMAGE" ]; then IMAGE="ghcr.io/example/iris-api:latest"; fi
-          sed -i "s#ghcr.io/.*/iris-api:latest#${IMAGE}#" k8s/deployment.yaml
+          sed -i "s#ghcr.io/.*/iris-api:latest#${{ env.IMAGE }}#" k8s/deployment.yaml
 
       - name: Upload manifests
         uses: actions/upload-artifact@v4
@@ -59,7 +59,7 @@ jobs:
   deploy:
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && secrets.KUBE_CONFIG != ''
+    if: github.ref == 'refs/heads/main' && env.KUBE_CONFIG != ''
     steps:
       - name: Download manifests
         uses: actions/download-artifact@v4
@@ -73,13 +73,21 @@ jobs:
           version: "v1.30.0"
 
       - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          if [ -n "$KUBE_CONFIG" ]; then
+            mkdir -p $HOME/.kube
+            echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+          else
+            echo "No kubeconfig provided, skipping deploy."
+          fi
 
-      - name: Apply Kubernetes manifests
+      - name: Apply manifests
         run: |
-          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
-
-      - name: Wait for rollout
-        run: kubectl rollout status deployment/iris-api --timeout=180s
+          if [ -f $HOME/.kube/config ]; then
+            kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+            kubectl rollout status deployment/iris-api --timeout=180s
+          else
+            echo "Skipping deployment."
+          fi
