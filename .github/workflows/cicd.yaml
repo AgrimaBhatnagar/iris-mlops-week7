@@ -59,7 +59,7 @@ jobs:
   deploy:
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && env.KUBE_CONFIG != ''
+    if: github.ref == 'refs/heads/main'   # no env/secrets here
     steps:
       - name: Download manifests
         uses: actions/download-artifact@v4
@@ -72,20 +72,23 @@ jobs:
         with:
           version: "v1.30.0"
 
-      - name: Configure kubeconfig
+      - name: Configure kubeconfig (skip if secret missing)
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
           if [ -n "$KUBE_CONFIG" ]; then
             mkdir -p $HOME/.kube
             echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+            echo "kubeconfig written."
           else
-            echo "No kubeconfig provided, skipping deploy."
+            echo "No KUBE_CONFIG secret; will skip deployment."
           fi
 
-      - name: Apply manifests
+      - name: Apply manifests (only if kubeconfig exists)
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
-          if [ -f $HOME/.kube/config ]; then
+          if [ -n "$KUBE_CONFIG" ]; then
             kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
             kubectl rollout status deployment/iris-api --timeout=180s
           else
