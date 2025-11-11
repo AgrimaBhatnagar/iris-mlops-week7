@@ -3,6 +3,7 @@ name: CI-CD-Scale-Tests
 on:
   push:
     branches: ["main"]
+  workflow_dispatch: {}
 
 jobs:
   build-and-deploy:
@@ -36,6 +37,7 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin
           IMAGE="ghcr.io/$OWNER_LC/iris-api:${{ github.sha }}"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "Using IMAGE=$IMAGE"
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
@@ -67,8 +69,53 @@ jobs:
         run: |
           gcloud container clusters get-credentials "$GCP_CLUSTER" --project "$GCP_PROJECT" --region "$GCP_LOCATION" ||           gcloud container clusters get-credentials "$GCP_CLUSTER" --project "$GCP_PROJECT" --zone "$GCP_LOCATION"
 
-      - name: Deploy to GKE
+      - name: Patch manifest with new image
         run: |
           sed -i "s#ghcr.io/.*/iris-api:latest#${{ env.IMAGE }}#" k8s/deployment.yaml
+
+      - name: Apply manifests
+        run: |
           kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
-          kubectl rollout status deployment/iris-api --timeout=180s
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/iris-api --timeout=240s
+
+      - name: Collect kubernetes diagnostics
+        run: |
+          mkdir -p artifacts
+          kubectl get pods -o wide -l app=iris-api > artifacts/pods.txt
+          kubectl describe deploy/iris-api > artifacts/deploy_describe.txt
+          kubectl describe svc/iris-api > artifacts/svc_describe.txt
+          kubectl get hpa iris-api -o yaml > artifacts/hpa.yaml || true
+          kubectl get events --sort-by=.lastTimestamp | tail -n 200 > artifacts/events_tail.txt
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-diagnostics
+          path: artifacts/
+
+      - name: Discover Service IP and smoke test
+        id: smoke
+        run: |
+          SVC_IP="$(kubectl get svc iris-api -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          echo "SVC_IP=$SVC_IP" >> $GITHUB_ENV
+          echo "service_ip=$SVC_IP" >> $GITHUB_OUTPUT
+          echo "Hitting http://$SVC_IP/healthz"
+          curl -sf "http://$SVC_IP/healthz"
+          echo
+          echo "Posting to /predict"
+          curl -sf -X POST "http://$SVC_IP/predict" -H 'Content-Type: application/json'             -d '{"X": [[5.1,3.5,1.4,0.2]]}'
+          echo
+
+      - name: Job Summary
+        run: |
+          {
+            echo "## ✅ IRIS API deployed"
+            echo ""
+            echo "- **Image:** \`${{ env.IMAGE }}\`"
+            echo "- **Service IP:** \`${{ steps.smoke.outputs.service_ip }}\`"
+            echo ""
+            echo "### Quick test"
+            echo "\\`curl http://${{ steps.smoke.outputs.service_ip }}/healthz\\`"
+            echo "\\`curl -X POST http://${{ steps.smoke.outputs.service_ip }}/predict -H 'Content-Type: application/json' -d '{"X": [[5.1,3.5,1.4,0.2]]}'\\`"
+          } >> $GITHUB_STEP_SUMMARY
