@@ -31,7 +31,6 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
-      # ---- GHCR login using PAT ----
       - name: Login to GHCR (PAT)
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
@@ -64,9 +63,9 @@ jobs:
       - name: Get GKE credentials
         uses: google-github-actions/get-gke-credentials@v2
         with:
-          project_id:  ${{ secrets.GCP_PROJECT }}
-          cluster_name:${{ secrets.GCP_CLUSTER }}
-          location:    ${{ secrets.GCP_LOCATION }}
+          project_id:   ${{ secrets.GCP_PROJECT }}
+          cluster_name: ${{ secrets.GCP_CLUSTER }}
+          location:     ${{ secrets.GCP_LOCATION }}
 
       - name: Deploy (inject image)
         run: |
