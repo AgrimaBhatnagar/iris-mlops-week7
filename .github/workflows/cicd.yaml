@@ -8,6 +8,9 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write    # <— REQUIRED for GHCR with GITHUB_TOKEN
 
     steps:
       - name: Checkout
@@ -28,18 +31,19 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
-      - name: Build and Push Docker Image
-        env:
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      # Login to GHCR with GITHUB_TOKEN (no PAT required)
+      - name: Login to GHCR
         run: |
-          OWNER_LC="$(echo -n "$GHCR_USERNAME" | tr '[:upper:]' '[:lower:]')"
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin
-          IMAGE="ghcr.io/$OWNER_LC/iris-api:${{ github.sha }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and Push Docker Image
+        run: |
+          OWNER_LC="$(echo -n "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/iris-api:${{ github.sha }}"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-          echo "Using IMAGE=$IMAGE"
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
+          echo "Pushed $IMAGE"
 
       - name: Install gcloud and GKE auth plugin (Ubuntu 24.04)
         run: |
@@ -80,32 +84,14 @@ jobs:
       - name: Wait for rollout
         run: kubectl rollout status deployment/iris-api --timeout=240s
 
-      - name: Collect kubernetes diagnostics
-        run: |
-          mkdir -p artifacts
-          kubectl get pods -o wide -l app=iris-api > artifacts/pods.txt
-          kubectl describe deploy/iris-api > artifacts/deploy_describe.txt
-          kubectl describe svc/iris-api > artifacts/svc_describe.txt
-          kubectl get hpa iris-api -o yaml > artifacts/hpa.yaml || true
-          kubectl get events --sort-by=.lastTimestamp | tail -n 200 > artifacts/events_tail.txt
-      - name: Upload diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-diagnostics
-          path: artifacts/
-
       - name: Discover Service IP and smoke test
         id: smoke
         run: |
           SVC_IP="$(kubectl get svc iris-api -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
           echo "SVC_IP=$SVC_IP" >> $GITHUB_ENV
           echo "service_ip=$SVC_IP" >> $GITHUB_OUTPUT
-          echo "Hitting http://$SVC_IP/healthz"
           curl -sf "http://$SVC_IP/healthz"
-          echo
-          echo "Posting to /predict"
           curl -sf -X POST "http://$SVC_IP/predict" -H 'Content-Type: application/json'             -d '{"X": [[5.1,3.5,1.4,0.2]]}'
-          echo
 
       - name: Job Summary
         run: |
@@ -114,8 +100,4 @@ jobs:
             echo ""
             echo "- **Image:** \`${{ env.IMAGE }}\`"
             echo "- **Service IP:** \`${{ steps.smoke.outputs.service_ip }}\`"
-            echo ""
-            echo "### Quick test"
-            echo "\\`curl http://${{ steps.smoke.outputs.service_ip }}/healthz\\`"
-            echo "\\`curl -X POST http://${{ steps.smoke.outputs.service_ip }}/predict -H 'Content-Type: application/json' -d '{"X": [[5.1,3.5,1.4,0.2]]}'\\`"
           } >> $GITHUB_STEP_SUMMARY
