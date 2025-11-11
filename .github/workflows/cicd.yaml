@@ -5,11 +5,8 @@ on:
     branches: ["main"]
 
 jobs:
-  build-and-test:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
       - name: Checkout
@@ -30,50 +27,19 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
-      - name: Build and Push Docker Image (if secrets set)
+      - name: Build and Push Docker Image
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          if [ -n "$GHCR_TOKEN" ] && [ -n "$GHCR_USERNAME" ]; then
-            OWNER_LC="$(echo -n "$GHCR_USERNAME" | tr "[:upper:]" "[:lower:]")"
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin
-            IMAGE="ghcr.io/$OWNER_LC/iris-api:${{ github.sha }}"
-            echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-            docker build -t "$IMAGE" .
-            docker push "$IMAGE"
-          else
-            echo "Skipping GHCR push (no secrets configured)."
-            echo "IMAGE=ghcr.io/example/iris-api:latest" >> $GITHUB_ENV
-          fi
+          OWNER_LC="$(echo -n "$GHCR_USERNAME" | tr '[:upper:]' '[:lower:]')"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin
+          IMAGE="ghcr.io/$OWNER_LC/iris-api:${{ github.sha }}"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
 
-      - name: Update deployment manifest
-        run: |
-          sed -i "s#ghcr.io/.*/iris-api:latest#${{ env.IMAGE }}#" k8s/deployment.yaml
-
-      - name: Upload manifests
-        uses: actions/upload-artifact@v4
-        with:
-          name: k8s-manifests
-          path: k8s/
-
-  deploy:
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'   # no env/secrets here
-    steps:
-      - name: Download manifests
-        uses: actions/download-artifact@v4
-        with:
-          name: k8s-manifests
-          path: k8s
-
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "v1.30.0"
-
-      - name: Install GKE auth plugin (noble/24.04, https, gpg keyring)
+      - name: Install gcloud and GKE auth plugin (Ubuntu 24.04)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y ca-certificates gnupg curl
@@ -81,29 +47,28 @@ jobs:
           curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
           sudo apt-get update -y
-          # Use new package names on Ubuntu 24.04
           sudo apt-get install -y google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin
           echo "KUBECTL_USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
-      - name: Configure kubeconfig (skip if secret missing)
+      - name: Authenticate to GCP (service account)
         env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
         run: |
-          if [ -n "$KUBE_CONFIG" ]; then
-            mkdir -p $HOME/.kube
-            echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
-            echo "kubeconfig written."
-          else
-            echo "No KUBE_CONFIG secret; will skip deployment."
-          fi
+          echo "$GCP_SA_KEY" > $HOME/gcp-key.json
+          gcloud auth activate-service-account --key-file="$HOME/gcp-key.json"
+          gcloud config set project "$GCP_PROJECT"
 
-      - name: Apply manifests (only if kubeconfig exists)
+      - name: Get GKE credentials (region or zone)
         env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_CLUSTER: ${{ secrets.GCP_CLUSTER }}
+          GCP_LOCATION: ${{ secrets.GCP_LOCATION }}
         run: |
-          if [ -n "$KUBE_CONFIG" ]; then
-            kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
-            kubectl rollout status deployment/iris-api --timeout=180s
-          else
-            echo "Skipping deployment."
-          fi
+          gcloud container clusters get-credentials "$GCP_CLUSTER" --project "$GCP_PROJECT" --region "$GCP_LOCATION" ||           gcloud container clusters get-credentials "$GCP_CLUSTER" --project "$GCP_PROJECT" --zone "$GCP_LOCATION"
+
+      - name: Deploy to GKE
+        run: |
+          sed -i "s#ghcr.io/.*/iris-api:latest#${{ env.IMAGE }}#" k8s/deployment.yaml
+          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+          kubectl rollout status deployment/iris-api --timeout=180s
