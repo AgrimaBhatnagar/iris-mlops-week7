@@ -36,11 +36,12 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           if [ -n "$GHCR_TOKEN" ] && [ -n "$GHCR_USERNAME" ]; then
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-            IMAGE="ghcr.io/$GHCR_USERNAME/iris-api:${{ github.sha }}"
+            OWNER_LC="$(echo -n "$GHCR_USERNAME" | tr "[:upper:]" "[:lower:]")"
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER_LC" --password-stdin
+            IMAGE="ghcr.io/$OWNER_LC/iris-api:${{ github.sha }}"
             echo "IMAGE=$IMAGE" >> $GITHUB_ENV
-            docker build -t $IMAGE .
-            docker push $IMAGE
+            docker build -t "$IMAGE" .
+            docker push "$IMAGE"
           else
             echo "Skipping GHCR push (no secrets configured)."
             echo "IMAGE=ghcr.io/example/iris-api:latest" >> $GITHUB_ENV
