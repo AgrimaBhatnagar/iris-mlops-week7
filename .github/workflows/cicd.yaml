@@ -73,13 +73,16 @@ jobs:
         with:
           version: "v1.30.0"
 
-      - name: Install GKE auth plugin
+      - name: Install GKE auth plugin (noble/24.04, https, gpg keyring)
         run: |
-          sudo mkdir -p /usr/share/keyrings
-          curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo tee /usr/share/keyrings/cloud.google.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
           sudo apt-get update -y
-          sudo apt-get install -y google-cloud-sdk google-cloud-sdk-gke-gcloud-auth-plugin
+          sudo apt-get install -y ca-certificates gnupg curl
+          sudo mkdir -p /usr/share/keyrings /etc/apt/keyrings
+          curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+          sudo apt-get update -y
+          # Use new package names on Ubuntu 24.04
+          sudo apt-get install -y google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin
           echo "KUBECTL_USE_GKE_GCLOUD_AUTH_PLUGIN=True" >> $GITHUB_ENV
 
       - name: Configure kubeconfig (skip if secret missing)
