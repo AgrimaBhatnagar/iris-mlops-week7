@@ -31,6 +31,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
+      # ---- GHCR login using PAT ----
       - name: Login to GHCR (PAT)
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
@@ -48,7 +49,7 @@ jobs:
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
-      # ---- Use official Google actions (no apt) ----
+      # ---- Use official Google actions ----
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
@@ -67,11 +68,55 @@ jobs:
           cluster_name: ${{ secrets.GCP_CLUSTER }}
           location:     ${{ secrets.GCP_LOCATION }}
 
-      - name: Deploy (inject image)
+      # --- Create/refresh imagePullSecret for private GHCR (safe if package is public) ---
+      - name: Ensure GHCR pull secret exists
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          sed -i "s#ghcr.io/.*/iris-api:.*#${{ env.IMAGE }}#" k8s/deployment.yaml
-          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
-          kubectl rollout status deployment/iris-api --timeout=240s
+          kubectl -n default delete secret ghcrcred --ignore-not-found
+          kubectl -n default create secret docker-registry ghcrcred \
+            --docker-server=ghcr.io \
+            --docker-username="$GHCR_USERNAME" \
+            --docker-password="$GHCR_TOKEN" \
+            --docker-email="none@example.com"
+          kubectl -n default patch deploy/iris-api --type='merge' -p '{
+            "spec": { "template": { "spec": { "imagePullSecrets": [ { "name": "ghcrcred" } ] } } }
+          }' || true
+
+      # --- Deploy without sed; set image directly; robust rollout with diagnostics ---
+      - name: Deploy (set image) + rollout with diagnostics
+        run: |
+          set -euo pipefail
+          echo "Injecting image: ${IMAGE}"
+          kubectl -n default set image deploy/iris-api iris-api="${IMAGE}"
+
+          # Avoid single-replica deadlocks
+          kubectl -n default patch deploy/iris-api --type='merge' -p '{
+            "spec": { "strategy": { "type": "Recreate", "rollingUpdate": null },
+                      "progressDeadlineSeconds": 300,
+                      "template": { "spec": { "terminationGracePeriodSeconds": 10 } } }
+          }' || true
+
+          # Apply svc/HPA idempotently
+          kubectl apply -f k8s/service.yaml -f k8s/hpa.yaml
+
+          echo "Waiting for rollout..."
+          set +e
+          kubectl -n default rollout status deployment/iris-api --timeout=360s
+          ROLL_RC=$?
+          set -e
+          if [ $ROLL_RC -ne 0 ]; then
+            echo "Rollout timed out - dumping diagnostics"
+            kubectl -n default get pods -l app=iris-api -o wide || true
+            kubectl -n default get rs -l app=iris-api || true
+            kubectl -n default get events --sort-by=.lastTimestamp | tail -n 80 || true
+            kubectl -n default describe deploy/iris-api | sed -n '1,200p' || true
+            for p in $(kubectl -n default get pods -l app=iris-api -o name); do
+              echo "--- $p ---"; kubectl -n default logs "$p" --tail=200 || true
+            done
+            exit 1
+          fi
 
       - name: Smoke test
         id: smoke
@@ -101,8 +146,6 @@ jobs:
             http://$SVC_IP/predict \
             -- \
             '{"X":[[5.1,3.5,1.4,0.2]]}' 'Content-Type: application/json' | tee wrk.out
-
-          # Extract simple metrics
           RPS=$(grep -Eo 'Requests/sec:\s+[0-9.]+' wrk.out | awk '{print $2}')
           LAT=$(grep -A1 'Latency' wrk.out | tail -n1 | awk '{print $1$2}')
           echo "rps=$RPS" >> $GITHUB_OUTPUT
