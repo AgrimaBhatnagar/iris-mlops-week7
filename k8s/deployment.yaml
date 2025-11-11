@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: iris-api
-          image: ghcr.io/<your-gh-username>/iris-api:latest
+          image: ghcr.io/agrimabhatnagar/iris-api:740009311bdd8a2c54359f7f2cf3a8026141c279
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
