@@ -89,3 +89,44 @@ jobs:
             echo "- Image: ${IMAGE}"
             echo "- Service IP: ${{ steps.smoke.outputs.service_ip }}"
           } >> $GITHUB_STEP_SUMMARY
+
+      - name: Load test with wrk (30s, 1000 conc)
+        id: wrk
+        run: |
+          SVC_IP="$(kubectl get svc iris-api -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+          echo "SVC_IP=$SVC_IP"
+          docker run --rm williamyeh/wrk \
+            -t16 -c1000 -d30s \
+            -s /usr/share/wrk/scripts/post.lua \
+            http://$SVC_IP/predict \
+            -- \
+            '{"X":[[5.1,3.5,1.4,0.2]]}' 'Content-Type: application/json' | tee wrk.out
+
+          # Extract simple metrics
+          RPS=$(grep -Eo 'Requests/sec:\s+[0-9.]+' wrk.out | awk '{print $2}')
+          LAT=$(grep -A1 'Latency' wrk.out | tail -n1 | awk '{print $1$2}')
+          echo "rps=$RPS" >> $GITHUB_OUTPUT
+          echo "lat=$LAT" >> $GITHUB_OUTPUT
+
+      - name: Snapshot HPA / Pods after load
+        id: snap
+        run: |
+          echo '```' >> hpa.txt
+          kubectl get hpa >> hpa.txt
+          echo '' >> hpa.txt
+          kubectl describe hpa iris-api | sed -n '1,120p' >> hpa.txt
+          echo '' >> hpa.txt
+          kubectl get pods -l app=iris-api -o wide >> hpa.txt
+          echo '```' >> hpa.txt
+
+      - name: Append results to Summary
+        run: |
+          {
+            echo "## 🚀 Load Test Results"
+            echo ""
+            echo "- **Requests/sec:** \`${{ steps.wrk.outputs.rps }}\`"
+            echo "- **Latency (summary):** \`${{ steps.wrk.outputs.lat }}\`"
+            echo ""
+            echo "### HPA / Pods after load"
+            cat hpa.txt
+          } >> $GITHUB_STEP_SUMMARY
